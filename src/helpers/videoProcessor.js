@@ -44,12 +44,14 @@ class VideoProcessor {
         //     endTime 
         //     tagline
         //     hPercentage
+        //     muted
         // }
         const videoPath = clipConfig.videoPath;
         const startTime = clipConfig.startTime;
         const endTime = clipConfig.endTime;
         const tagline = clipConfig.tagline;
         const hPercentage = clipConfig.hPercentage;
+        const muted = clipConfig.muted ?? false; // Default to false if not specified
 
         if (!fs.existsSync(videoPath)) {
             throw new Error(`Video file not found: ${videoPath}`);
@@ -310,8 +312,16 @@ class VideoProcessor {
                 .on('error', (err) => {
                     console.error('FFmpeg error (first stage): ', err);
                     reject(err);
-                })
-                .run();
+                });
+
+            // Add audio handling based on muted parameter
+            if (muted) {
+                ffmpegCommand.outputOptions(['-an']); // Remove audio
+            } else {
+                ffmpegCommand.outputOptions(['-c:a', 'aac', '-b:a', '128k']); // Keep audio with AAC codec
+            }
+
+            ffmpegCommand.run();
         });
 
         return tempOutputPath;
