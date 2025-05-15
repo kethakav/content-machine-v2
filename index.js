@@ -86,7 +86,7 @@ const downloadYoutubeVideo = async (url) => {
 
 // Validate request body
 const validateRequest = (req) => {
-    const { theme, preset, clipConfig } = req.body;
+    const { theme, preset, clipConfig, imageConfig } = req.body;
 
     console.log(req.body);
     
@@ -111,6 +111,25 @@ const validateRequest = (req) => {
             throw new Error(`Clip ${index} must have startTime and endTime`);
         }
     });
+
+    // Validate imageConfig if present
+    if (imageConfig) {
+        if (!Array.isArray(imageConfig)) {
+            throw new Error('imageConfig must be an array');
+        }
+        
+        imageConfig.forEach((config, index) => {
+            if (!config.imagePath) {
+                throw new Error(`imageConfig[${index}] must have imagePath`);
+            }
+            if (config.startTime === undefined || config.endTime === undefined) {
+                throw new Error(`imageConfig[${index}] must have startTime and endTime`);
+            }
+            if (config.x === undefined || config.y === undefined) {
+                throw new Error(`imageConfig[${index}] must have x and y coordinates`);
+            }
+        });
+    }
 };
 
 app.post('/process-video', upload.array('media'), async (req, res) => {
@@ -118,7 +137,7 @@ app.post('/process-video', upload.array('media'), async (req, res) => {
         // Validate request
         validateRequest(req);
         
-        const { theme, preset, clipConfig } = req.body;
+        const { theme, preset, clipConfig, imageConfig } = req.body;
         
         // Process YouTube URLs in clipConfig
         for (const clip of clipConfig) {
@@ -135,8 +154,8 @@ app.post('/process-video', upload.array('media'), async (req, res) => {
         // Create VideoProcessor instance
         const processor = new VideoProcessor(theme, preset);
         
-        // Process the video
-        const outputPath = await processor.createVideo(clipConfig);
+        // Process the video with imageConfig if present
+        const outputPath = await processor.createVideo(clipConfig, imageConfig);
         
         // Send the video URL in response
         res.json({

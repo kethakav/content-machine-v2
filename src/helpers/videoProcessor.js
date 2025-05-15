@@ -317,7 +317,7 @@ class VideoProcessor {
         return tempOutputPath;
     }
 
-    async createVideo(videoSegments) {
+    async createVideo(videoSegments, imageConfig) {
         try {
             const processedSegments = [];
             
@@ -330,10 +330,14 @@ class VideoProcessor {
             }
 
             if (processedSegments.length === 1) {
-                return processedSegments[0];
+                const finalVideo = processedSegments[0];
+                if (imageConfig && imageConfig.length > 0) {
+                    return await this.addImageOverlays(finalVideo, imageConfig);
+                }
+                return finalVideo;
             }
 
-            // Fixed the Date.not() typo to Date.now()
+            // Concatenate videos
             const finalOutputPath = path.resolve(outputDir, `final_${Date.now()}.mp4`);
             const tempListPath = path.resolve(outputDir, `temp_list_${Date.now()}.txt`);
 
@@ -374,11 +378,87 @@ class VideoProcessor {
                     .run();
             });
 
+            // Add image overlays if imageConfig are provided
+            if (imageConfig && imageConfig.length > 0) {
+                const finalVideoWithOverlays = await this.addImageOverlays(finalOutputPath, imageConfig);
+                // Clean up the intermediate video
+                this.cleanupFile(finalOutputPath);
+                return finalVideoWithOverlays;
+            }
+
             return finalOutputPath;
         } catch (error) {
             console.error('Error creating video: ', error);
             throw error;
         }
+    }
+
+    async addImageOverlays(videoPath, imageConfig) {
+        const outputPath = path.resolve(outputDir, `overlay_${Date.now()}.mp4`);
+
+        // Verify all image files exist
+        for (const config of imageConfig) {
+            if (!fs.existsSync(config.imagePath)) {
+                throw new Error(`Image file not found: ${config.imagePath}`);
+            }
+        }
+
+        await new Promise((resolve, reject) => {
+            const ffmpegCommand = ffmpeg();
+            
+            // Add the video input
+            ffmpegCommand.input(videoPath);
+            
+            // Add all image inputs
+            imageConfig.forEach((config, index) => {
+                ffmpegCommand.input(config.imagePath);
+            });
+            
+            // Create the complex filter for the overlays
+            const filters = [];
+            let lastOutput = '0:v'; // Start with the video input
+
+            // Add each overlay in sequence
+            imageConfig.forEach((config, index) => {
+                const { startTime, endTime, x, y } = config;
+                const inputIndex = index + 1; // +1 because 0 is the video input
+                
+                filters.push({
+                    filter: 'overlay',
+                    options: {
+                        x: x,
+                        y: y,
+                        enable: `between(t,${startTime},${endTime})`
+                    },
+                    inputs: [lastOutput, `${inputIndex}:v`],
+                    outputs: `overlay${index}`
+                });
+                
+                lastOutput = `overlay${index}`;
+            });
+
+            ffmpegCommand
+                .complexFilter(filters)
+                .outputOptions([
+                    `-map [${lastOutput}]`,
+                    '-map 0:a?'
+                ])
+                .output(outputPath)
+                .on('start', (commandLine) => {
+                    console.log('FFmpeg overlay command:', commandLine);
+                })
+                .on('end', () => {
+                    console.log(`Successfully added image overlays: ${outputPath}`);
+                    resolve(outputPath);
+                })
+                .on('error', (err) => {
+                    console.error('Error adding image overlays: ', err);
+                    reject(err);
+                })
+                .run();
+        });
+
+        return outputPath;
     }
 
     cleanupFile(filePath) {
