@@ -86,7 +86,7 @@ const downloadYoutubeVideo = async (url) => {
 
 // Validate request body
 const validateRequest = (req) => {
-    const { theme, preset, clipConfig, imageConfig } = req.body;
+    const { theme, preset, clipConfig, imageConfig, audioConfig } = req.body;
 
     console.log(req.body);
     
@@ -130,6 +130,25 @@ const validateRequest = (req) => {
             }
         });
     }
+
+    // Validate audioConfig if present
+    if (audioConfig) {
+        if (!Array.isArray(audioConfig)) {
+            throw new Error('audioConfig must be an array');
+        }
+        
+        audioConfig.forEach((config, index) => {
+            if (!config.audioPath) {
+                throw new Error(`audioConfig[${index}] must have audioPath`);
+            }
+            if (config.audioStartTime === undefined || config.audioEndTime === undefined) {
+                throw new Error(`audioConfig[${index}] must have audioStartTime and audioEndTime`);
+            }
+            if (config.videoInsertTime === undefined) {
+                throw new Error(`audioConfig[${index}] must have videoInsertTime`);
+            }
+        });
+    }
 };
 
 app.post('/process-video', upload.array('media'), async (req, res) => {
@@ -137,7 +156,7 @@ app.post('/process-video', upload.array('media'), async (req, res) => {
         // Validate request
         validateRequest(req);
         
-        const { theme, preset, clipConfig, imageConfig } = req.body;
+        const { theme, preset, clipConfig, imageConfig, audioConfig } = req.body;
         
         // Process YouTube URLs in clipConfig
         for (const clip of clipConfig) {
@@ -154,8 +173,8 @@ app.post('/process-video', upload.array('media'), async (req, res) => {
         // Create VideoProcessor instance
         const processor = new VideoProcessor(theme, preset);
         
-        // Process the video with imageConfig if present
-        const outputPath = await processor.createVideo(clipConfig, imageConfig);
+        // Process the video with imageConfig and audioConfig if present
+        const outputPath = await processor.createVideo(clipConfig, imageConfig, audioConfig);
         
         // Send the video URL in response
         res.json({

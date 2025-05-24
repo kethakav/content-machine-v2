@@ -13,7 +13,7 @@ const PRESETS = {
     wide: {
         name: 'wide',
         textPositionY: 300,
-        fontSize: 70
+        fontSize: 50
     },
     square: {
         name: 'square',
@@ -291,12 +291,25 @@ class VideoProcessor {
 
             console.log('LastOutput: ', lastOutput);
 
+            // Add audio handling based on muted parameter
+            if (muted) {
+                // Add volume filter to the main filter chain
+                filters.push({
+                    filter: 'volume',
+                    options: {
+                        volume: 0
+                    },
+                    inputs: '0:a',
+                    outputs: 'muted_audio'
+                });
+            }
+
             // Only apply complex filter if there are filters to apply
             if (filters.length > 0) {
                 ffmpegCommand.complexFilter(filters);
                 ffmpegCommand.outputOptions([
-                    `-map [${lastOutput}]`, // use the last filter label
-                    '-map 0:a?' 
+                    `-map [${lastOutput}]`, // use the last filter label for video
+                    muted ? '-map [muted_audio]' : '-map 0:a?' // map either muted audio or original audio
                 ]);
             }
 
@@ -314,10 +327,18 @@ class VideoProcessor {
                     reject(err);
                 });
 
-            // Add audio handling based on muted parameter
-            if (muted) {
-                ffmpegCommand.outputOptions(['-an']); // Remove audio
-            } else {
+            // Add standardized output options for consistent format
+            ffmpegCommand.outputOptions([
+                '-c:v', 'libx264',        // Use H.264 codec
+                '-preset', 'medium',      // Balance between quality and encoding speed
+                '-crf', '23',            // Constant Rate Factor for consistent quality
+                '-pix_fmt', 'yuv420p',   // Standard pixel format
+                '-r', '30',              // Standard frame rate
+                '-movflags', '+faststart' // Enable fast start for web playback
+            ]);
+
+            // Add audio codec settings
+            if (!muted) {
                 ffmpegCommand.outputOptions(['-c:a', 'aac', '-b:a', '128k']); // Keep audio with AAC codec
             }
 
@@ -327,7 +348,7 @@ class VideoProcessor {
         return tempOutputPath;
     }
 
-    async createVideo(videoSegments, imageConfig) {
+    async createVideo(videoSegments, imageConfig, audioConfig) {
         try {
             const processedSegments = [];
             
@@ -341,10 +362,17 @@ class VideoProcessor {
 
             if (processedSegments.length === 1) {
                 const finalVideo = processedSegments[0];
+                let videoWithOverlays = finalVideo;
+                
                 if (imageConfig && imageConfig.length > 0) {
-                    return await this.addImageOverlays(finalVideo, imageConfig);
+                    videoWithOverlays = await this.addImageOverlays(finalVideo, imageConfig);
                 }
-                return finalVideo;
+                
+                if (audioConfig && audioConfig.length > 0) {
+                    videoWithOverlays = await this.addAudioOverlays(videoWithOverlays, audioConfig);
+                }
+                
+                return videoWithOverlays;
             }
 
             // Concatenate videos
@@ -388,15 +416,24 @@ class VideoProcessor {
                     .run();
             });
 
+            let finalVideo = finalOutputPath;
+
             // Add image overlays if imageConfig are provided
             if (imageConfig && imageConfig.length > 0) {
-                const finalVideoWithOverlays = await this.addImageOverlays(finalOutputPath, imageConfig);
+                finalVideo = await this.addImageOverlays(finalOutputPath, imageConfig);
                 // Clean up the intermediate video
                 this.cleanupFile(finalOutputPath);
-                return finalVideoWithOverlays;
             }
 
-            return finalOutputPath;
+            // Add audio overlays if audioConfig is provided
+            if (audioConfig && audioConfig.length > 0) {
+                const videoWithAudio = await this.addAudioOverlays(finalVideo, audioConfig);
+                // Clean up the intermediate video
+                this.cleanupFile(finalVideo);
+                finalVideo = videoWithAudio;
+            }
+
+            return finalVideo;
         } catch (error) {
             console.error('Error creating video: ', error);
             throw error;
@@ -463,6 +500,100 @@ class VideoProcessor {
                 })
                 .on('error', (err) => {
                     console.error('Error adding image overlays: ', err);
+                    reject(err);
+                })
+                .run();
+        });
+
+        return outputPath;
+    }
+
+    async addAudioOverlays(videoPath, audioConfigs) {
+        const outputPath = path.resolve(outputDir, `audio_overlay_${Date.now()}.mp4`);
+
+        // Verify all audio files exist
+        for (const config of audioConfigs) {
+            if (!fs.existsSync(config.audioPath)) {
+                throw new Error(`Audio file not found: ${config.audioPath}`);
+            }
+        }
+
+        await new Promise((resolve, reject) => {
+            const ffmpegCommand = ffmpeg();
+            
+            // Add the video input
+            ffmpegCommand.input(videoPath);
+            
+            // Add all audio inputs
+            audioConfigs.forEach((config, index) => {
+                ffmpegCommand.input(config.audioPath);
+            });
+            
+            // Create the complex filter for the audio overlays
+            const filters = [];
+            let lastAudioOutput = '0:a'; // Start with the video's audio track
+            
+            // Process each audio configuration
+            audioConfigs.forEach((config, index) => {
+                const inputIndex = index + 1; // +1 because 0 is the video input
+                
+                // Extract the audio segment we want to use
+                filters.push({
+                    filter: 'atrim',
+                    options: {
+                        start: config.audioStartTime,
+                        end: config.audioEndTime
+                    },
+                    inputs: `${inputIndex}:a`,
+                    outputs: `trimmed_audio${index}`
+                });
+
+                // Add delay to position the audio at the correct timestamp
+                filters.push({
+                    filter: 'adelay',
+                    options: {
+                        delays: `${config.videoInsertTime * 1000}|${config.videoInsertTime * 1000}`
+                    },
+                    inputs: `trimmed_audio${index}`,
+                    outputs: `delayed_audio${index}`
+                });
+
+                // Mix with the previous audio output
+                filters.push({
+                    filter: 'amix',
+                    options: {
+                        inputs: 2,
+                        duration: 'longest'
+                    },
+                    inputs: [lastAudioOutput, `delayed_audio${index}`],
+                    outputs: `mixed_audio${index}`
+                });
+                
+                lastAudioOutput = `mixed_audio${index}`;
+            });
+
+            // Set up the output options
+            const outputOptions = [
+                '-map 0:v', // Map the video stream
+                `-map [${lastAudioOutput}]`, // Map the final mixed audio
+                '-c:v copy', // Copy video codec
+                '-c:a aac', // Use AAC for audio
+                '-b:a 192k' // Set audio bitrate
+            ];
+
+            ffmpegCommand
+                .complexFilter(filters)
+                .outputOptions(outputOptions)
+                .output(outputPath)
+                .on('start', (commandLine) => {
+                    console.log('FFmpeg audio overlay command:', commandLine);
+                })
+                .on('end', () => {
+                    console.log(`Successfully added audio overlays: ${outputPath}`);
+                    resolve(outputPath);
+                })
+                .on('error', (err) => {
+                    console.error('Error adding audio overlays: ', err);
                     reject(err);
                 })
                 .run();
